@@ -2,6 +2,7 @@ import os
 from typing import TypedDict
 from dotenv import load_dotenv
 from pathlib import Path
+
 from langgraph.graph import StateGraph, END
 
 from langchain_groq import ChatGroq
@@ -59,6 +60,7 @@ def create_vectorstore(chunks):
 # -------------------------
 # LLM
 # -------------------------
+print('abc', os.getenv("GROQ_API_KEY"))
 
 llm = ChatGroq(
     api_key=os.getenv("GROQ_API_KEY"),
@@ -91,110 +93,134 @@ set_retriever(retriever)
 # -------------------------
 # State
 # -------------------------
-
 class GraphState(TypedDict):
     question: str
     context: str
-    route: str
+    tool: str
     answer: str
-    retries: int
 
 
 # -------------------------
-# Retrieve Node
+# resercher node
 # -------------------------
+def agent(state):
+
+    question = state["question"]
+
+    prompt = f"""
+    You are a router.
+
+    If the question contains arithmetic or mathematical calculations
+    (addition, subtraction, multiplication, division, percentages, powers, etc.),
+    reply only:
+
+    calculator
+
+    Otherwise reply only:
+
+    search
+
+    Question:
+    {question}
+    """
+
+    response = llm.invoke(prompt)
+    print("Agent response:", response.content.strip().lower())
+
+    return {
+        "tool": response.content.strip().lower()
+    }
+
+
+def route_tool(state):
+    return state["tool"]
 
 def retrieve(state):
-
-    global retriever
-
-    if retriever is None:
-
-        return {
-            "context": ""
-        }
 
     docs = retriever.invoke(
         state["question"]
     )
+    print("Retrieved Docs:", len(docs))
+
 
     context = "\n".join(
-        [doc.page_content for doc in docs]
+        doc.page_content
+        for doc in docs
     )
+    print("Context:")
+    print(context[:500])
 
     return {
         "context": context
     }
 
-
-# -------------------------
-# Grade Context Node
-# -------------------------
-
 def grade_context(state):
 
-    question = state["question"]
-    context = state["context"]
-
     prompt = f"""
-    You are a relevance checker.
+You are a routing system.
+
+Question:
+{state["question"]}
+
+Retrieved Context:
+{state["context"]}
+
+If the retrieved context contains information
+that can answer the question, output exactly:
+
+pdf
+
+Otherwise output exactly:
+
+llm
+
+Return one word only.
+"""
+
+    response = llm.invoke(prompt)
+    print("Grade Decision:", response.content.strip().lower())
+
+    return {
+        "tool": response.content.strip().lower()
+    }
+
+def calculator_tool(state):
+    print("Invoking calculator tool")
+
+    question = state["question"]
+    print("Question:", question)
+    prompt = f"""
+    Convert this question into a valid Python math expression.
 
     Question:
     {question}
 
-    Context:
-    {context}
-
-    Determine whether the context contains information useful for answering the question.
-
-    Reply with ONLY one word:
-
-    yes
-    or
-    no
+    Return only the expression.
     """
 
-    response = llm.invoke(prompt)
+    expression = llm.invoke(prompt).content.strip()
+    print("expression", expression)
 
-    decision = response.content.strip().lower()
-
-    if "yes" in decision:
-        route = "rag"
-    else:
-        route = "llm"
+    result = eval(expression)
 
     return {
-        "route": route
+        "answer": str(result)
     }
 
-
-# -------------------------
-# Router
-# -------------------------
-def route_question(state):
-
-    if state["route"] == "rag":
-        return "rag"
-
-    if state.get("retries", 0) >= 2:
-        return "llm"
-
-    return "rewrite"
-# def route_question(state):
-#     return state["route"]
-
-
-# -------------------------
-# RAG Answer Node
-# -------------------------
-
-def rag_answer(state):
+def pdf_tool(state):
+    print("Invoking PDF tool")
 
     question = state["question"]
-    context = state["context"]
+
+    docs = retriever.invoke(question)
+
+    context = "\n".join(
+        doc.page_content
+        for doc in docs
+    )
 
     prompt = f"""
-    Answer ONLY from the provided context.
+    Answer using the provided context.
 
     Context:
     {context}
@@ -210,11 +236,8 @@ def rag_answer(state):
     }
 
 
-# -------------------------
-# General LLM Node
-# -------------------------
-
-def general_answer(state):
+def llm_tool(state):
+    print("Invoking LLM tool")
 
     question = state["question"]
 
@@ -223,48 +246,29 @@ def general_answer(state):
     return {
         "answer": response.content
     }
-
-# -------------------------
-# Rewrite Question Node
-# -------------------------
-
-def rewrite_question(state):
-
-    question = state["question"]
-
-    prompt = f"""
-Rewrite the following question
-to make it clearer and better for document retrieval.
-
-Question:
-{question}
-
-Return only the rewritten question.
-"""
-
-    response = llm.invoke(prompt)
-
-    new_question = response.content.strip()
-
-    return {
-        "question": new_question,
-        "retries": state.get("retries", 0) + 1
-    }
-
-
 # -------------------------
 # Build Graph
 # -------------------------
 
 builder = StateGraph(GraphState)
 
-builder.add_node("retrieve", retrieve)
+builder.add_node("agent", agent)
+builder.add_node("calculator_tool", calculator_tool)
 builder.add_node("grade_context", grade_context)
-builder.add_node("rag_answer", rag_answer)
-builder.add_node("general_answer", general_answer)
-builder.add_node("rewrite_question", rewrite_question)
+builder.add_node("retrieve", retrieve)
+builder.add_node("pdf_tool", pdf_tool)
+builder.add_node("llm_tool", llm_tool)
 
-builder.set_entry_point("retrieve")
+builder.set_entry_point("agent")
+
+builder.add_conditional_edges(
+    "agent",
+    route_tool,
+    {
+        "calculator": "calculator_tool",
+        "search": "retrieve"
+    }
+)
 
 builder.add_edge(
     "retrieve",
@@ -273,26 +277,25 @@ builder.add_edge(
 
 builder.add_conditional_edges(
     "grade_context",
-    route_question,
+    route_tool,
     {
-        "rag": "rag_answer",
-        "rewrite": "rewrite_question",
-        "llm": "general_answer"
+        "pdf": "pdf_tool",
+        "llm": "llm_tool"
     }
 )
 
 builder.add_edge(
-    "rewrite_question",
-    "retrieve"
-)
-
-builder.add_edge(
-    "rag_answer",
+    "calculator_tool",
     END
 )
 
 builder.add_edge(
-    "general_answer",
+    "pdf_tool",
+    END
+)
+
+builder.add_edge(
+    "llm_tool",
     END
 )
 

@@ -47,7 +47,7 @@ async def upload_pdf(
 async def ask_question(data: QuestionRequest):
 
     # Import graph lazily to avoid loading heavy dependencies at module import
-    from tool_agent_rag import graph
+    from multi_agent_rag import graph
 
     result = graph.invoke(
         {
@@ -56,6 +56,6 @@ async def ask_question(data: QuestionRequest):
     )
 
     return {
-        # "question": result["question"],
+        "question": result["question"],
         "answer": result["answer"]
     }

@@ -2,6 +2,7 @@ import os
 from typing import TypedDict
 from dotenv import load_dotenv
 from pathlib import Path
+
 from langgraph.graph import StateGraph, END
 
 from langchain_groq import ChatGroq
@@ -94,205 +95,133 @@ set_retriever(retriever)
 
 class GraphState(TypedDict):
     question: str
-    context: str
-    route: str
-    answer: str
+    research: str
+    final_answer: str
+    review: str
     retries: int
 
 
 # -------------------------
-# Retrieve Node
+# resercher node
 # -------------------------
+def researcher(state):
 
-def retrieve(state):
+    question = state["question"]
 
-    global retriever
+    prompt = f"""
+You are a researcher.
 
-    if retriever is None:
+Provide detailed research notes.
 
-        return {
-            "context": ""
-        }
+Question:
+{question}
+"""
 
-    docs = retriever.invoke(
-        state["question"]
-    )
-
-    context = "\n".join(
-        [doc.page_content for doc in docs]
-    )
+    response = llm.invoke(prompt)
 
     return {
-        "context": context
+        "research": response.content,
+        "retries": state.get("retries", 0) + 1
     }
 
 
 # -------------------------
-# Grade Context Node
+# summarizer node
 # -------------------------
+def summarizer(state):
 
-def grade_context(state):
-
-    question = state["question"]
-    context = state["context"]
+    research = state["research"]
 
     prompt = f"""
-    You are a relevance checker.
+You are a summarizer.
 
-    Question:
-    {question}
+Summarize the following research.
 
-    Context:
-    {context}
+Research:
+{research}
+"""
 
-    Determine whether the context contains information useful for answering the question.
+    response = llm.invoke(prompt)
 
-    Reply with ONLY one word:
+    return {
+        "final_answer": response.content
+    }
 
-    yes
-    or
-    no
-    """
+# -------------------------
+# critic node
+# -------------------------
+
+
+def critic(state):
+
+    research = state["research"]
+
+    prompt = f"""
+You are a research reviewer.
+
+Review the research below.
+
+Research:
+{research}
+
+If the research is detailed and complete reply only:
+
+good
+
+Otherwise reply only:
+
+bad
+"""
 
     response = llm.invoke(prompt)
 
     decision = response.content.strip().lower()
 
-    if "yes" in decision:
-        route = "rag"
-    else:
-        route = "llm"
+    print("Critic Decision:", decision)
 
     return {
-        "route": route
+        "review": decision
     }
 
+def route_after_critic(state):
 
-# -------------------------
-# Router
-# -------------------------
-def route_question(state):
+    review = state["review"]
 
-    if state["route"] == "rag":
-        return "rag"
+    if "good" in review:
+        return "summarizer"
 
     if state.get("retries", 0) >= 2:
-        return "llm"
+        return "summarizer"
 
-    return "rewrite"
-# def route_question(state):
-#     return state["route"]
-
-
-# -------------------------
-# RAG Answer Node
-# -------------------------
-
-def rag_answer(state):
-
-    question = state["question"]
-    context = state["context"]
-
-    prompt = f"""
-    Answer ONLY from the provided context.
-
-    Context:
-    {context}
-
-    Question:
-    {question}
-    """
-
-    response = llm.invoke(prompt)
-
-    return {
-        "answer": response.content
-    }
-
-
-# -------------------------
-# General LLM Node
-# -------------------------
-
-def general_answer(state):
-
-    question = state["question"]
-
-    response = llm.invoke(question)
-
-    return {
-        "answer": response.content
-    }
-
-# -------------------------
-# Rewrite Question Node
-# -------------------------
-
-def rewrite_question(state):
-
-    question = state["question"]
-
-    prompt = f"""
-Rewrite the following question
-to make it clearer and better for document retrieval.
-
-Question:
-{question}
-
-Return only the rewritten question.
-"""
-
-    response = llm.invoke(prompt)
-
-    new_question = response.content.strip()
-
-    return {
-        "question": new_question,
-        "retries": state.get("retries", 0) + 1
-    }
-
-
+    return "researcher"
 # -------------------------
 # Build Graph
 # -------------------------
 
 builder = StateGraph(GraphState)
 
-builder.add_node("retrieve", retrieve)
-builder.add_node("grade_context", grade_context)
-builder.add_node("rag_answer", rag_answer)
-builder.add_node("general_answer", general_answer)
-builder.add_node("rewrite_question", rewrite_question)
+builder.add_node("researcher", researcher)
+builder.add_node("summarizer", summarizer)
+builder.add_node("critic", critic)
 
-builder.set_entry_point("retrieve")
+builder.set_entry_point("researcher")
 
 builder.add_edge(
-    "retrieve",
-    "grade_context"
+    "researcher",
+    "critic"
 )
 
 builder.add_conditional_edges(
-    "grade_context",
-    route_question,
+    "critic",
+    route_after_critic,
     {
-        "rag": "rag_answer",
-        "rewrite": "rewrite_question",
-        "llm": "general_answer"
+        "researcher": "researcher",
+        "summarizer": "summarizer"
     }
 )
 
 builder.add_edge(
-    "rewrite_question",
-    "retrieve"
-)
-
-builder.add_edge(
-    "rag_answer",
-    END
-)
-
-builder.add_edge(
-    "general_answer",
+    "summarizer",
     END
 )
 
