@@ -1,0 +1,6 @@
+INFO:mcp.server.lowlevel.server:Processing request of type CallToolRequest
+INFO:root:Calculator called
+INFO:mcp.server.lowlevel.server:Processing request of type ListToolsRequest
+INFO:mcp.server.lowlevel.server:Processing request of type CallToolRequest
+INFO:root:Weather called
+INFO:mcp.server.lowlevel.server:Processing request of type ListToolsRequest
